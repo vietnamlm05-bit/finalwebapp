@@ -1,0 +1,1349 @@
+'use client';
+import React, { useState, useMemo, useEffect } from 'react';
+import { useApp } from '@/context/AppContext';
+import { Search, Filter, ArrowDownLeft, ArrowUpRight, ArrowRightLeft, Calendar, FileSpreadsheet, Plus, Edit2, Trash2, FileCheck, X, Upload, BarChart3, ReceiptText, AlertTriangle, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, } from 'lucide-react';
+import { formatCurrency, formatSignedCurrency, formatDate, exportToCSV, exportToExcel, formatNumberWithDots, formatMonthLabel, toLocalDateTimeInput, normalizeSaveDate, toLocalDateKey, getLocalDateString, compressImageFile, sortTransactionsByDateDesc } from '@/lib/utils';
+import { POPULAR_TAGS } from '@/lib/mock-data';
+import { ReceiptModal } from './ReceiptModal';
+import { DatePreview } from './DatePreview';
+import { ReportsView } from './ReportsView';
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, } from 'recharts';
+const pieChartColors = ['#f97316', '#ec4899', '#8b5cf6', '#0ea5e9', '#eab308', '#10b981', '#64748b', '#ef4444'];
+export const TransactionsView = () => {
+    const { transactions, wallets, categories, budgets, financialSummary, currentMonth, availableMonths, openQuickAdd, openStatementModal, deleteTransaction, navTargetCategoryId, setNavTargetCategoryId, language, t, tCategory, tWalletType, tTag, tWalletName, tNote, showConfirm, } = useApp();
+    const [activeSubTab, setActiveSubTab] = useState('LIST'); // 'LIST' | 'REPORTS'
+    const [showCharts, setShowCharts] = useState(true);
+    // Search & Filters State
+    const [searchTerm, setSearchTerm] = useState('');
+    const [selectedType, setSelectedType] = useState('ALL');
+    const [selectedWallet, setSelectedWallet] = useState('ALL');
+    const [selectedCategory, setSelectedCategory] = useState('ALL');
+    const [selectedTag, setSelectedTag] = useState('ALL');
+    const [startDate, setStartDate] = useState('');
+    const [endDate, setEndDate] = useState('');
+    // Modals state
+    const [receiptToView, setReceiptToView] = useState(null);
+    const [transactionToEdit, setTransactionToEdit] = useState(null);
+    const [hoveredPieIndex, setHoveredPieIndex] = useState(null);
+    const [selectedMonth, setSelectedMonth] = useState('ALL');
+    const [pieType, setPieType] = useState('EXPENSE');
+    const [barMode, setBarMode] = useState('BOTH');
+    const INITIAL_VISIBLE_COUNT = 10;
+    const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE_COUNT);
+    const handlePrevMonth = () => {
+        const activeM = selectedMonth !== 'ALL' ? selectedMonth : currentMonth;
+        const currentIndex = availableMonths.indexOf(activeM);
+        if (currentIndex !== -1 && currentIndex < availableMonths.length - 1) {
+            setSelectedMonth(availableMonths[currentIndex + 1]);
+        }
+        else if (currentIndex === -1 && availableMonths.length > 0) {
+            setSelectedMonth(availableMonths[0]);
+        }
+    };
+    const handleNextMonth = () => {
+        const activeM = selectedMonth !== 'ALL' ? selectedMonth : currentMonth;
+        const currentIndex = availableMonths.indexOf(activeM);
+        if (currentIndex > 0) {
+            setSelectedMonth(availableMonths[currentIndex - 1]);
+        }
+    };
+    // Auto-filter when navigated from Alert Center
+    useEffect(() => {
+        if (navTargetCategoryId) {
+            setSelectedCategory(navTargetCategoryId);
+            setSelectedType('EXPENSE');
+            setSelectedWallet('ALL');
+            setSelectedTag('ALL');
+            setSearchTerm('');
+            setStartDate('');
+            setEndDate('');
+        }
+    }, [navTargetCategoryId]);
+    // Reset pagination when any filter changes
+    useEffect(() => {
+        setVisibleCount(INITIAL_VISIBLE_COUNT);
+    }, [searchTerm, selectedType, selectedWallet, selectedCategory, selectedTag, startDate, endDate, selectedMonth]);
+    // Filter logic
+    const filteredTransactions = useMemo(() => {
+        const todayKey = getLocalDateString();
+        // Sorted by date before paging, so "load more" walks back in time instead of in insertion order
+        return sortTransactionsByDateDesc(transactions.filter((tx) => {
+            // Never show transactions from the future (no transactions exist before their date arrives)
+            if (toLocalDateKey(tx.date) > todayKey)
+                return false;
+            // Month filter (applied when no custom date range is specified)
+            if (selectedMonth !== 'ALL' && !startDate && !endDate) {
+                if (!toLocalDateKey(tx.date).startsWith(selectedMonth))
+                    return false;
+            }
+            // Type
+            if (selectedType !== 'ALL' && tx.type !== selectedType)
+                return false;
+            // Wallet
+            if (selectedWallet !== 'ALL') {
+                if (tx.walletId !== selectedWallet && tx.toWalletId !== selectedWallet)
+                    return false;
+            }
+            // Category
+            if (selectedCategory !== 'ALL' && tx.categoryId !== selectedCategory)
+                return false;
+            // Tag
+            if (selectedTag !== 'ALL') {
+                const targetDisplay = (tTag ? tTag(selectedTag) : selectedTag).toLowerCase();
+                const hasTag = (tx.tags || []).some((t) => {
+                    if (t === selectedTag) return true;
+                    const d = (tTag ? tTag(t) : t).toLowerCase();
+                    return d === targetDisplay;
+                });
+                if (!hasTag) return false;
+            }
+            // Date Range
+            if (startDate) {
+                const txDate = toLocalDateKey(tx.date);
+                if (txDate < startDate)
+                    return false;
+            }
+            if (endDate) {
+                const txDate = toLocalDateKey(tx.date);
+                if (txDate > endDate)
+                    return false;
+            }
+            // Search term
+            if (searchTerm.trim()) {
+                const term = searchTerm.trim().toLowerCase();
+                // Match both the stored (Vietnamese) value and what is displayed in the current language
+                const matches = (raw, translate) => {
+                    if (!raw)
+                        return false;
+                    if (String(raw).toLowerCase().includes(term))
+                        return true;
+                    const shown = translate ? translate(raw) : '';
+                    return Boolean(shown) && String(shown).toLowerCase().includes(term);
+                };
+                const matchNote = matches(tx.note, tNote);
+                const matchCat = matches(tx.categoryName, tCategory);
+                const matchWallet = matches(tx.walletName, tWalletName) || matches(tx.toWalletName, tWalletName);
+                const matchTags = (tx.tags || []).some((tag) => matches(tag, tTag));
+                if (!matchNote && !matchCat && !matchWallet && !matchTags)
+                    return false;
+            }
+            return true;
+        }));
+    }, [transactions, selectedMonth, selectedType, selectedWallet, selectedCategory, selectedTag, startDate, endDate, searchTerm, tTag, tNote, tCategory, tWalletName]);
+    // Auto switch pieType if active filtered transactions have no expenses but have income
+    useEffect(() => {
+        const hasExpenses = filteredTransactions.some((t) => t.type === 'EXPENSE');
+        const hasIncome = filteredTransactions.some((t) => t.type === 'INCOME');
+        if (!hasExpenses && hasIncome) {
+            setPieType('INCOME');
+        }
+        else if (hasExpenses && !hasIncome) {
+            setPieType('EXPENSE');
+        }
+    }, [filteredTransactions]);
+    // Aggregate statistics for filtered results
+    const stats = useMemo(() => {
+        let income = 0;
+        let expense = 0;
+        filteredTransactions.forEach((t) => {
+            if (t.type === 'INCOME')
+                income += t.amount;
+            if (t.type === 'EXPENSE')
+                expense += t.amount;
+        });
+        return {
+            count: filteredTransactions.length,
+            income,
+            expense,
+            net: income - expense,
+        };
+    }, [filteredTransactions]);
+    // Bar chart (6-month comparison) data for TransactionsView
+    const barChartData = useMemo(() => {
+        const latestMonth = availableMonths[0] || currentMonth || '2026-10';
+        const [y, m] = latestMonth.split('-').map(Number);
+        const monthList = [];
+        for (let i = 5; i >= 0; i--) {
+            const d = new Date(y || 2026, (m || 10) - 1 - i, 1);
+            monthList.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
+        }
+        return monthList.map((mo) => {
+            const moTxs = transactions.filter((t) => t.date.startsWith(mo));
+            const thu = moTxs.filter((t) => t.type === 'INCOME').reduce((s, t) => s + t.amount, 0);
+            const chi = moTxs.filter((t) => t.type === 'EXPENSE').reduce((s, t) => s + t.amount, 0);
+            return {
+                month: `T${mo.slice(5)}`,
+                rawMonth: mo,
+                Thu: thu,
+                Chi: chi,
+            };
+        });
+    }, [transactions, currentMonth, availableMonths]);
+    // Daily breakdown when a specific month is selected
+    const dailyBarChartData = useMemo(() => {
+        if (selectedMonth === 'ALL')
+            return [];
+        const monthTxs = transactions.filter((t) => t.date.startsWith(selectedMonth));
+        const dayMap = {};
+        monthTxs.forEach((t) => {
+            const dStr = t.date.split('T')[0];
+            const dayLabel = `${dStr.slice(8, 10)}/${dStr.slice(5, 7)}`;
+            if (!dayMap[dayLabel]) {
+                dayMap[dayLabel] = { Thu: 0, Chi: 0, dateStr: dStr };
+            }
+            if (t.type === 'INCOME')
+                dayMap[dayLabel].Thu += t.amount;
+            if (t.type === 'EXPENSE')
+                dayMap[dayLabel].Chi += t.amount;
+        });
+        return Object.keys(dayMap)
+            .sort((a, b) => dayMap[a].dateStr.localeCompare(dayMap[b].dateStr))
+            .map((dayLabel) => ({
+            month: dayLabel,
+            Thu: dayMap[dayLabel].Thu,
+            Chi: dayMap[dayLabel].Chi,
+            rawMonth: dayMap[dayLabel].dateStr,
+        }));
+    }, [transactions, selectedMonth]);
+    const activeBarChartData = selectedMonth !== 'ALL' && dailyBarChartData.length > 0 ? dailyBarChartData : barChartData;
+    // Scaled bar chart data: values strictly 0 produce 0 height (no bar drawn)
+    // Non-zero values scale progressively so bars visibly grow without flattening
+    const scaledBarChartData = useMemo(() => {
+        const rawData = activeBarChartData;
+        if (!rawData || rawData.length === 0)
+            return [];
+        const relevantValues = [];
+        rawData.forEach((d) => {
+            if ((barMode === 'BOTH' || barMode === 'INCOME') && d.Thu > 0)
+                relevantValues.push(d.Thu);
+            if ((barMode === 'BOTH' || barMode === 'EXPENSE') && d.Chi > 0)
+                relevantValues.push(d.Chi);
+        });
+        if (relevantValues.length === 0) {
+            return rawData.map((d) => ({ ...d, displayThu: 0, displayChi: 0 }));
+        }
+        const maxVal = Math.max(...relevantValues);
+        const minVal = Math.min(...relevantValues);
+        const ratio = maxVal / (minVal || 1);
+        const useSymlog = ratio > 20;
+        const C = Math.max(minVal, 100000);
+        const maxLog = Math.log10(1 + maxVal / C);
+        const scaleVal = (val) => {
+            if (val <= 0)
+                return 0;
+            if (!useSymlog) {
+                return (val / maxVal) * 100;
+            }
+            return (Math.log10(1 + val / C) / maxLog) * 100;
+        };
+        return rawData.map((d) => ({
+            ...d,
+            displayThu: scaleVal(d.Thu),
+            displayChi: scaleVal(d.Chi),
+        }));
+    }, [activeBarChartData, barMode]);
+    const pieChartData = useMemo(() => {
+        const targetTxs = filteredTransactions.filter((t) => t.type === pieType);
+        const catMap = {};
+        targetTxs.forEach((t) => {
+            const cat = t.categoryName || tCategory('Khác');
+            catMap[cat] = (catMap[cat] || 0) + t.amount;
+        });
+        const list = Object.keys(catMap).map((catName) => {
+            const matchedCat = categories.find((c) => c.name === catName);
+            return {
+                name: catName,
+                value: catMap[catName],
+                color: matchedCat?.color || '',
+            };
+        });
+        // Sort descending by value (highest spending category first)
+        list.sort((a, b) => b.value - a.value);
+        return list.map((item, idx) => ({
+            ...item,
+            color: item.color || (pieType === 'INCOME' ? ['#10b981', '#06b6d4', '#3b82f6', '#8b5cf6', '#f59e0b', '#ec4899'][idx % 6] : pieChartColors[idx % pieChartColors.length]),
+        }));
+    }, [filteredTransactions, categories, pieType, tCategory]);
+    const totalPieAmount = useMemo(() => {
+        return pieChartData.reduce((sum, item) => sum + item.value, 0);
+    }, [pieChartData]);
+    // Sliced transactions for View More pagination
+    const visibleTransactions = useMemo(() => {
+        return filteredTransactions.slice(0, visibleCount);
+    }, [filteredTransactions, visibleCount]);
+    // Group by Date for Timeline View (based on visible transactions)
+    const groupedTransactions = useMemo(() => {
+        const groups = {};
+        visibleTransactions.forEach((tx) => {
+            const dateKey = toLocalDateKey(tx.date);
+            if (!groups[dateKey]) {
+                groups[dateKey] = [];
+            }
+            groups[dateKey].push(tx);
+        });
+        // Sort dates descending
+        const sortedDates = Object.keys(groups).sort((a, b) => b.localeCompare(a));
+        return sortedDates.map((dateKey) => {
+            const dayTxs = groups[dateKey];
+            const dayIncome = dayTxs.filter((t) => t.type === 'INCOME').reduce((s, t) => s + t.amount, 0);
+            const dayExpense = dayTxs.filter((t) => t.type === 'EXPENSE').reduce((s, t) => s + t.amount, 0);
+            return {
+                dateKey,
+                transactions: dayTxs,
+                dayIncome,
+                dayExpense,
+                net: dayIncome - dayExpense,
+            };
+        });
+    }, [visibleTransactions]);
+    const allTags = useMemo(() => {
+        const map = new Map();
+        transactions.forEach((t) => {
+            (t.tags || []).forEach((tag) => {
+                const display = (tTag ? tTag(tag) : tag) || tag;
+                if (!map.has(display)) {
+                    map.set(display, tag);
+                }
+            });
+        });
+        return Array.from(map.entries()).map(([display, raw]) => ({ display, raw }));
+    }, [transactions, tTag]);
+    const clearFilters = () => {
+        setSearchTerm('');
+        setSelectedType('ALL');
+        setSelectedWallet('ALL');
+        setSelectedCategory('ALL');
+        setSelectedTag('ALL');
+        setStartDate('');
+        setEndDate('');
+        setSelectedMonth('ALL');
+    };
+    const hasActiveFilters = searchTerm !== '' ||
+        selectedType !== 'ALL' ||
+        selectedWallet !== 'ALL' ||
+        selectedCategory !== 'ALL' ||
+        selectedTag !== 'ALL' ||
+        startDate !== '' ||
+        endDate !== '' ||
+        selectedMonth !== 'ALL';
+    return (<div className="space-y-6 pb-12">
+      {/* 0. SUB-TAB SWITCHER (UNIFY TRANSACTIONS & REPORTS) */}
+      <div className="flex items-center justify-between flex-wrap gap-4 pb-2 border-b border-slate-200 dark:border-slate-800">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-800 dark:text-white tracking-tight">
+            {activeSubTab === 'LIST' ? t('tx.title', 'Sổ Giao Dịch') : t('reports.title', 'Báo Cáo Tài Chính')}
+          </h1>
+        </div>
+
+        <div className="flex items-center bg-slate-100 dark:bg-slate-800/80 p-1 rounded-2xl border border-slate-200 dark:border-slate-700/80">
+          <button
+            type="button"
+            onClick={() => setActiveSubTab('LIST')}
+            className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+              activeSubTab === 'LIST'
+                ? 'bg-blue-600 text-white shadow-sm'
+                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+            }`}
+          >
+            <ReceiptText className="w-3.5 h-3.5" />
+            <span>{t('tx.tabList', 'Danh sách giao dịch')}</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveSubTab('REPORTS')}
+            className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+              activeSubTab === 'REPORTS'
+                ? 'bg-blue-600 text-white shadow-sm'
+                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+            }`}
+          >
+            <BarChart3 className="w-3.5 h-3.5" />
+            <span>{t('tx.tabReports', 'Báo cáo & Phân tích')}</span>
+          </button>
+        </div>
+      </div>
+
+      {activeSubTab === 'REPORTS' ? (
+        <ReportsView />
+      ) : (
+        <>
+          {/* 1. HEADER & ACTIONS */}
+          <div className="flex flex-wrap items-center justify-end gap-2.5">
+            <button onClick={() => setShowCharts((s) => !s)} className="flex items-center space-x-1.5 px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 rounded-xl text-xs font-semibold shadow-sm transition-colors cursor-pointer" title={showCharts ? t('tx.hideCharts', 'Ẩn biểu đồ') : t('tx.showCharts', 'Xem biểu đồ')}>
+              <BarChart3 className="w-4 h-4 text-indigo-500"/>
+              <span>{showCharts ? t('tx.hideCharts', 'Ẩn biểu đồ') : t('tx.showCharts', 'Xem biểu đồ')}</span>
+            </button>
+
+            <button onClick={() => exportToCSV(filteredTransactions, undefined, language)} className="flex items-center space-x-1.5 px-3 py-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 hover:bg-slate-50 text-slate-700 dark:text-slate-200 rounded-xl text-xs font-semibold shadow-sm transition-colors cursor-pointer" title="CSV">
+              <FileSpreadsheet className="w-4 h-4 text-emerald-600"/>
+              <span>{t('tx.exportCSV', 'Xuất CSV')}</span>
+            </button>
+
+            <button onClick={() => exportToExcel(filteredTransactions, budgets, wallets, financialSummary, undefined, currentMonth, language)} className="flex items-center space-x-1.5 px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-semibold shadow-sm transition-colors cursor-pointer" title="Excel">
+              <FileSpreadsheet className="w-4 h-4"/>
+              <span>{t('tx.exportExcel', 'Xuất Excel')}</span>
+            </button>
+
+            <button onClick={() => openStatementModal()} className="flex items-center space-x-1.5 px-3.5 py-2 bg-emerald-50 dark:bg-emerald-950/60 hover:bg-emerald-100 dark:hover:bg-emerald-900/60 border border-emerald-300 dark:border-emerald-700/60 text-emerald-700 dark:text-emerald-300 rounded-xl text-xs font-bold shadow-sm transition-colors cursor-pointer" title={t('tx.importStatementTitle', 'Tải file sao kê ngân hàng Excel / CSV để cộng trừ tự động')}>
+              <Upload className="w-4 h-4 text-emerald-600 dark:text-emerald-400"/>
+              <span>{t('tx.importStatement', 'Tải sao kê lên')}</span>
+            </button>
+
+            <button onClick={() => openQuickAdd('EXPENSE')} className="flex items-center space-x-1.5 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold shadow-sm transition-colors cursor-pointer">
+              <Plus className="w-4 h-4"/>
+              <span>{t('tx.newTx', 'Giao dịch mới')}</span>
+            </button>
+          </div>
+
+          {/* 1.5. COMPACT MONTH SELECTOR */}
+          <div className="flex items-center justify-between flex-wrap gap-2.5 p-3 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm">
+            <div className="flex items-center gap-2">
+              <Calendar className="w-4 h-4 text-blue-500"/>
+              <span className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                {t('tx.filterMonth', 'Kỳ hiển thị:')}
+              </span>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <button type="button" onClick={() => setSelectedMonth('ALL')} className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${selectedMonth === 'ALL'
+                ? 'bg-blue-600 text-white shadow-sm'
+                : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'}`}>
+                {t('tx.allMonths', 'Tất cả các tháng')}
+              </button>
+              <div className="relative">
+                <select
+                  value={selectedMonth === 'ALL' ? '' : selectedMonth}
+                  onChange={(e) => {
+                    if (e.target.value) setSelectedMonth(e.target.value);
+                  }}
+                  className={`px-3 py-1.5 pr-7 rounded-xl text-xs font-bold border transition-all cursor-pointer focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                    selectedMonth !== 'ALL'
+                      ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
+                      : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
+                  }`}
+                >
+                  <option value="" disabled className="bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300">
+                    {selectedMonth === 'ALL' ? t('tx.chooseMonth', 'Chọn tháng cụ thể...') : formatMonthLabel(selectedMonth, language)}
+                  </option>
+                  {availableMonths.map((m) => (
+                    <option key={m} value={m} className="bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100">
+                      {formatMonthLabel(m, language)} {m === currentMonth ? `(${t('tx.quickMonth', 'Hiện tại')})` : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          </div>
+
+      {/* 2. STATS SUMMARY BAR OF FILTERED TRANSACTIONS */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-white dark:bg-slate-900 p-4 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm">
+        <div>
+          <span className="text-[11px] font-semibold text-slate-400 uppercase">
+            {t('tx.txCount', 'Số giao dịch')}
+          </span>
+          <p className="text-lg font-black text-slate-800 dark:text-white">
+            {stats.count} {language === 'en' ? 'txs' : 'GD'}
+          </p>
+        </div>
+        <div>
+          <span className="text-[11px] font-semibold text-slate-400 uppercase">
+            {t('tx.totalIncome', 'Tổng khoản thu')}
+          </span>
+          <p className="text-lg font-black text-emerald-600 dark:text-emerald-400">
+            {formatSignedCurrency(stats.income, '+')}
+          </p>
+        </div>
+        <div>
+          <span className="text-[11px] font-semibold text-slate-400 uppercase">
+            {t('tx.totalExpense', 'Tổng khoản chi')}
+          </span>
+          <p className="text-lg font-black text-rose-600 dark:text-rose-400">
+            {formatSignedCurrency(stats.expense, '-')}
+          </p>
+        </div>
+        <div>
+          <span className="text-[11px] font-semibold text-slate-400 uppercase">
+            {t('tx.netCashflow', 'Chênh lệch thu - chi')}
+          </span>
+          <p className={`text-lg font-black ${stats.net >= 0 ? 'text-blue-600 dark:text-blue-400' : 'text-rose-600 dark:text-rose-400'}`}>
+            {stats.net >= 0 ? '+' : ''}
+            {formatCurrency(stats.net)}
+          </p>
+        </div>
+      </div>
+
+      {/* 2.5. CHARTS: INCOME - EXPENSE & SPENDING ALLOCATION IN TRANSACTION LOG */}
+      {showCharts && (<div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          {/* Bar Chart: Thu - Chi */}
+          <div className="lg:col-span-2 bg-white dark:bg-slate-900 rounded-2xl p-4 border border-slate-200 dark:border-slate-800 shadow-sm">
+            <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900 dark:text-white">{t('tx.cashflowMonthly', 'Dòng tiền Thu - Chi')}</h3>
+              </div>
+
+              {/* Bar Chart Mode Toggle */}
+              <div className="flex items-center p-0.5 rounded-xl bg-slate-100 dark:bg-slate-800 text-[11px] font-semibold border border-slate-200 dark:border-slate-700">
+                <button type="button" onClick={() => setBarMode('BOTH')} className={`px-2 py-0.5 rounded-lg transition-all cursor-pointer ${barMode === 'BOTH'
+                ? 'bg-blue-600 text-white shadow-xs'
+                : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'}`}>
+                  {t('tx.bothCashflow', 'Thu & Chi')}
+                </button>
+                <button type="button" onClick={() => setBarMode('EXPENSE')} className={`px-2 py-0.5 rounded-lg transition-all cursor-pointer ${barMode === 'EXPENSE'
+                ? 'bg-rose-500 text-white shadow-xs'
+                : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'}`}>
+                  {t('tx.onlyExpense', 'Chỉ Chi tiêu')}
+                </button>
+                <button type="button" onClick={() => setBarMode('INCOME')} className={`px-2 py-0.5 rounded-lg transition-all cursor-pointer ${barMode === 'INCOME'
+                ? 'bg-emerald-500 text-white shadow-xs'
+                : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'}`}>
+                  {t('tx.onlyIncome', 'Chỉ Thu nhập')}
+                </button>
+              </div>
+            </div>
+            <div className="h-56 w-full">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={scaledBarChartData} margin={{ top: 10, right: 10, left: 10, bottom: 0 }} onClick={(e) => {
+                if (e && e.activePayload && e.activePayload.length) {
+                    const clickedMonth = e.activePayload[0].payload.rawMonth;
+                    if (clickedMonth && clickedMonth.length === 7)
+                        setSelectedMonth(clickedMonth);
+                }
+            }}>
+                  <XAxis dataKey="month" tick={{ fontSize: 12 }} axisLine={false} tickLine={false} dy={8}/>
+                  <YAxis domain={[0, 100]} hide={true}/>
+                  <Tooltip content={({ active, payload }) => {
+                if (!active || !payload || !payload.length)
+                    return null;
+                const data = payload[0].payload;
+                return (<div className="bg-slate-900/95 dark:bg-slate-800/95 backdrop-blur-md text-white text-xs px-3.5 py-2.5 rounded-xl shadow-xl border border-slate-700/60 pointer-events-none z-50 min-w-[150px]">
+                          <p className="font-bold text-slate-200 mb-1.5 border-b border-slate-700/60 pb-1">
+                            {data.rawMonth ? formatDate(data.rawMonth, 'short', language) : data.month}
+                          </p>
+                          <div className="space-y-1">
+                            {(barMode === 'BOTH' || barMode === 'INCOME') && (<div className="flex items-center justify-between gap-3 text-emerald-400">
+                                <span className="text-slate-400">{t('dashboard.income', 'Thu nhập')}:</span>
+                                <span className="font-bold">
+                                  {data.Thu > 0 ? `+${formatCurrency(data.Thu)}` : '0 ₫'}
+                                </span>
+                              </div>)}
+                            {(barMode === 'BOTH' || barMode === 'EXPENSE') && (<div className="flex items-center justify-between gap-3 text-rose-400">
+                                <span className="text-slate-400">{t('dashboard.expense', 'Chi tiêu')}:</span>
+                                <span className="font-bold">
+                                  {data.Chi > 0 ? `-${formatCurrency(data.Chi)}` : '0 ₫'}
+                                </span>
+                              </div>)}
+                          </div>
+                        </div>);
+            }}/>
+                  {(barMode === 'BOTH' || barMode === 'INCOME') && (<Bar dataKey="displayThu" fill="#10b981" shape={(props) => {
+                    const { x, y, width, height, value } = props;
+                    if (!value || value <= 0 || height <= 0)
+                        return <g />;
+                    const r = Math.min(6, width / 2);
+                    const minH = 4;
+                    const h = Math.max(height, minH);
+                    const adjustedY = y - (h - height);
+                    return (<rect x={x} y={adjustedY} width={width} height={h} fill="#10b981" rx={r} ry={r} className="cursor-pointer transition-all hover:opacity-80"/>);
+                }} name={t('dashboard.income', 'Thu nhập')}/>)}
+                  {(barMode === 'BOTH' || barMode === 'EXPENSE') && (<Bar dataKey="displayChi" fill="#f43f5e" shape={(props) => {
+                    const { x, y, width, height, value } = props;
+                    if (!value || value <= 0 || height <= 0)
+                        return <g />;
+                    const r = Math.min(6, width / 2);
+                    const minH = 4;
+                    const h = Math.max(height, minH);
+                    const adjustedY = y - (h - height);
+                    return (<rect x={x} y={adjustedY} width={width} height={h} fill="#f43f5e" rx={r} ry={r} className="cursor-pointer transition-all hover:opacity-80"/>);
+                }} name={t('dashboard.expense', 'Chi tiêu')}/>)}
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+
+          {/* Pie Chart: Expense / Income Breakdown */}
+          <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 border border-slate-200 dark:border-slate-800 shadow-sm flex flex-col justify-between">
+            <div className="flex items-center justify-between mb-1 flex-wrap gap-2">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                  {pieType === 'INCOME' ? t('tx.incomeStructure', 'Cơ cấu thu nhập') : t('tx.expenseStructure', 'Cơ cấu chi tiêu')}
+                </h3>
+              </div>
+
+              <div className="flex items-center gap-1.5">
+                {/* Toggle Expense / Income */}
+                <div className="flex items-center p-0.5 rounded-xl bg-slate-100 dark:bg-slate-800 text-[11px] font-semibold border border-slate-200 dark:border-slate-700">
+                  <button type="button" onClick={() => setPieType('EXPENSE')} className={`px-2 py-0.5 rounded-lg transition-all cursor-pointer ${pieType === 'EXPENSE'
+                ? 'bg-rose-500 text-white shadow-xs'
+                : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'}`}>
+                    {t('dash.expense', 'Chi tiêu')}
+                  </button>
+                  <button type="button" onClick={() => setPieType('INCOME')} className={`px-2 py-0.5 rounded-lg transition-all cursor-pointer ${pieType === 'INCOME'
+                ? 'bg-emerald-500 text-white shadow-xs'
+                : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'}`}>
+                    {t('dash.income', 'Thu nhập')}
+                  </button>
+                </div>
+
+                {totalPieAmount > 0 && (<span className={`text-xs font-bold px-2.5 py-1 rounded-full border ${pieType === 'INCOME'
+                    ? 'bg-emerald-50 dark:bg-emerald-950/50 text-emerald-600 dark:text-emerald-400 border-emerald-200 dark:border-emerald-900/40'
+                    : 'bg-rose-50 dark:bg-rose-950/50 text-rose-600 dark:text-rose-400 border-rose-200 dark:border-rose-900/40'}`}>
+                    {formatSignedCurrency(totalPieAmount, pieType === 'INCOME' ? '+' : '-')}
+                  </span>)}
+              </div>
+            </div>
+
+            {/* Quick Scope Toggle / Month Navigator */}
+            <div className="flex items-center justify-between my-2 pb-1.5 border-b border-slate-100 dark:border-slate-800 flex-wrap gap-1.5">
+              <span className="text-[11px] text-slate-400 font-medium">{t('tx.statPeriod', 'Kỳ thống kê:')}</span>
+              {/* wraps inside narrow chart columns (sidebar open on 1024-1280px screens) instead of overflowing */}
+              <div className="flex flex-wrap items-center gap-1 min-w-0 max-w-full">
+                <button type="button" onClick={handlePrevMonth} disabled={selectedMonth === availableMonths[availableMonths.length - 1]} className="p-1 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-500 hover:text-slate-800 dark:hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-colors cursor-pointer" title={t('tx.prevMonth', 'Tháng trước')}>
+                  <ChevronLeft className="w-3.5 h-3.5"/>
+                </button>
+
+                <select value={selectedMonth} onChange={(e) => setSelectedMonth(e.target.value)} className="min-w-0 max-w-full px-2 py-0.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-[11px] font-semibold text-slate-800 dark:text-white border-0 focus:ring-1 focus:ring-blue-500 cursor-pointer">
+                  <option value="ALL">{t('tx.allMonths', 'Tất cả các tháng')}</option>
+                  {availableMonths.map((m) => (<option key={m} value={m}>
+                      {formatMonthLabel(m, language)} {m === currentMonth ? `(${t('tx.quickMonth', 'Hiện tại')})` : ''}
+                    </option>))}
+                </select>
+
+                <button type="button" onClick={handleNextMonth} disabled={selectedMonth === availableMonths[0]} className="p-1 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-500 hover:text-slate-800 dark:hover:text-white disabled:opacity-30 disabled:cursor-not-allowed transition-colors cursor-pointer" title={t('tx.nextMonth', 'Tháng sau')}>
+                  <ChevronRight className="w-3.5 h-3.5"/>
+                </button>
+
+                <button type="button" onClick={() => setSelectedMonth('ALL')} className={`px-2 py-0.5 rounded-lg text-[11px] font-semibold transition-all cursor-pointer ${selectedMonth === 'ALL'
+                ? 'bg-blue-600 text-white shadow-xs'
+                : 'bg-slate-100 dark:bg-slate-800 text-slate-500 hover:text-slate-700 dark:hover:text-slate-300'}`}>
+                  {t('tx.quickAllTime', 'Tất cả')}
+                </button>
+              </div>
+            </div>
+
+            {pieChartData.length > 0 ? (<>
+                {/* Donut Chart with Center Interactive Metrics */}
+                <div className="relative h-44 w-full flex items-center justify-center my-1">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie data={pieChartData} cx="50%" cy="50%" innerRadius={50} outerRadius={70} paddingAngle={2.5} dataKey="value" onMouseEnter={(_, index) => setHoveredPieIndex(index)} onMouseLeave={() => setHoveredPieIndex(null)}>
+                        {pieChartData.map((entry, index) => (<Cell key={`cell-${index}`} fill={entry.color} stroke={hoveredPieIndex === index ? '#ffffff' : 'transparent'} strokeWidth={hoveredPieIndex === index ? 2 : 0} style={{
+                        transform: hoveredPieIndex === index ? 'scale(1.04)' : 'scale(1)',
+                        transformOrigin: 'center center',
+                        transition: 'all 0.2s ease',
+                        cursor: 'pointer',
+                    }}/>))}
+                      </Pie>
+                      <Tooltip content={({ active, payload }) => {
+                    if (active && payload && payload.length) {
+                        const data = payload[0].payload;
+                        const percent = totalPieAmount > 0 ? ((data.value / totalPieAmount) * 100).toFixed(1) : '0';
+                        return (<div className="bg-slate-900/95 dark:bg-slate-800/95 backdrop-blur-md text-white text-xs px-3 py-2 rounded-xl shadow-xl border border-slate-700/60 pointer-events-none z-50">
+                                <div className="flex items-center gap-1.5 mb-1">
+                                  <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: data.color }}/>
+                                  <span className="font-bold text-white">{data.name}</span>
+                                </div>
+                                <div className="flex items-center justify-between gap-3 text-slate-300">
+                                  <span className="font-semibold text-white">{formatCurrency(data.value)}</span>
+                                  <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-white/10 text-emerald-300">
+                                    {percent}%
+                                  </span>
+                                </div>
+                              </div>);
+                    }
+                    return null;
+                }}/>
+                    </PieChart>
+                  </ResponsiveContainer>
+
+                  {/* Center of the Donut */}
+                  <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none text-center px-2">
+                    {hoveredPieIndex !== null && pieChartData[hoveredPieIndex] ? (<div className="animate-in fade-in zoom-in-90 duration-150">
+                        <p className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 truncate max-w-[85px] mx-auto">
+                          {tCategory(pieChartData[hoveredPieIndex].name)}
+                        </p>
+                        <p className="text-base font-black text-slate-900 dark:text-white leading-tight">
+                          {totalPieAmount > 0
+                        ? ((pieChartData[hoveredPieIndex].value / totalPieAmount) * 100).toFixed(1)
+                        : 0}%
+                        </p>
+                        <p className="text-[10px] font-bold text-slate-600 dark:text-slate-300">
+                          {formatCurrency(pieChartData[hoveredPieIndex].value)}
+                        </p>
+                      </div>) : (<div>
+                        <p className="text-[10px] uppercase font-bold text-slate-400 dark:text-slate-500 tracking-wider">
+                          {pieType === 'INCOME' ? t('dash.income', 'Tổng thu') : t('dash.expense', 'Tổng chi')}
+                        </p>
+                        <p className={`text-sm font-black leading-tight mt-0.5 ${pieType === 'INCOME' ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-900 dark:text-white'}`}>
+                          {formatCurrency(totalPieAmount)}
+                        </p>
+                        <p className="text-[10px] text-slate-400 dark:text-slate-500 font-medium">
+                          {pieChartData.length} {t('reports.categories', 'danh mục')}
+                        </p>
+                      </div>)}
+                  </div>
+                </div>
+
+                {/* Category Breakdown List with Percentage & Sleek Progress Bars */}
+                <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1 mt-1 scrollbar-thin [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-slate-300 dark:[&::-webkit-scrollbar-thumb]:bg-slate-700">
+                  {pieChartData.map((entry, idx) => {
+                    const percent = totalPieAmount > 0 ? ((entry.value / totalPieAmount) * 100).toFixed(1) : '0';
+                    const isHovered = hoveredPieIndex === idx;
+                    return (<div key={entry.name} onMouseEnter={() => setHoveredPieIndex(idx)} onMouseLeave={() => setHoveredPieIndex(null)} className={`p-1.5 rounded-xl transition-all cursor-pointer ${isHovered
+                            ? 'bg-slate-100 dark:bg-slate-800 scale-[1.01]'
+                            : 'hover:bg-slate-50 dark:hover:bg-slate-800/40'}`}>
+                        <div className="flex items-center justify-between text-xs mb-1">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="w-2.5 h-2.5 rounded-full shrink-0 ring-2 ring-white dark:ring-slate-900" style={{ backgroundColor: entry.color }}/>
+                            <span className="text-slate-700 dark:text-slate-300 font-medium truncate">
+                              {tCategory(entry.name)}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2 shrink-0">
+                            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300">
+                              {percent}%
+                            </span>
+                            <span className="font-bold text-slate-900 dark:text-white">
+                              {formatCurrency(entry.value)}
+                            </span>
+                          </div>
+                        </div>
+                        {/* Mini progress bar */}
+                        <div className="w-full h-1 bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden">
+                          <div className="h-full rounded-full transition-all duration-300" style={{
+                            width: `${percent}%`,
+                            backgroundColor: entry.color,
+                        }}/>
+                        </div>
+                      </div>);
+                })}
+                </div>
+              </>) : (<div className="flex flex-col items-center justify-center py-10 text-xs text-slate-400">
+                <BarChart3 className="w-8 h-8 text-slate-300 dark:text-slate-700 mb-2 stroke-[1.5]"/>
+                <p>{t('tx.noTx', 'Không có dữ liệu chi tiêu phù hợp')}</p>
+              </div>)}
+          </div>
+        </div>)}
+
+      {/* 2.8 NOTIFICATION DEEP-LINK BANNER */}
+      {navTargetCategoryId && selectedCategory === navTargetCategoryId && (<div className="flex flex-col sm:flex-row sm:items-center sm:justify-between p-4 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900/60 rounded-2xl text-xs text-rose-700 dark:text-rose-300 shadow-xs gap-3 animate-in fade-in duration-200">
+          <div className="flex items-center space-x-3">
+            <div className="w-8 h-8 rounded-xl bg-rose-500/10 text-rose-600 dark:text-rose-400 flex items-center justify-center shrink-0">
+              <AlertTriangle className="w-4 h-4 animate-bounce"/>
+            </div>
+            <div>
+              <p className="font-bold text-sm text-rose-800 dark:text-rose-200">
+                {t('tx.viewingDetail', 'Đang xem chi tiết chi tiêu:')} {tCategory(categories.find((c) => c.id === navTargetCategoryId)?.name || t('nav.notifications', 'Cảnh báo'))}
+              </p>
+              <p className="text-rose-600/90 dark:text-rose-400/90 mt-0.5">
+                {t('tx.filteredByCategoryAlert', 'Danh sách giao dịch bên dưới đã được tự động lọc theo danh mục này từ Trung tâm Cảnh báo.')}
+              </p>
+            </div>
+          </div>
+          <button onClick={() => {
+                setSelectedCategory('ALL');
+                setNavTargetCategoryId(null);
+            }} className="px-3.5 py-1.5 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-xl font-bold shadow-xs text-xs border border-slate-200 dark:border-slate-700 cursor-pointer self-start sm:self-auto shrink-0 transition-colors">
+            {t('dash.viewAll', 'Xem tất cả giao dịch')}
+          </button>
+        </div>)}
+
+      {/* 3. ADVANCED FILTER BAR */}
+      <div className="bg-white dark:bg-slate-900 p-4 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center space-x-2 text-xs font-bold text-slate-700 dark:text-slate-300">
+            <Filter className="w-4 h-4 text-blue-500"/>
+            <span>{t('tx.filterTitle', 'Bộ lọc tìm kiếm & Khoảng thời gian')}</span>
+          </div>
+          {hasActiveFilters && (<button onClick={clearFilters} className="text-xs font-semibold text-rose-600 hover:text-rose-700 flex items-center space-x-1 cursor-pointer">
+              <X className="w-3.5 h-3.5"/>
+              <span>{t('tx.clearFilters', 'Xóa bộ lọc')}</span>
+            </button>)}
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-7 gap-2.5">
+          {/* Keyword search */}
+          <div className="relative">
+            <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"/>
+            <input type="text" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} placeholder={t('tx.searchPlaceholder', 'Tìm theo ghi chú, tên danh mục, ví...')} className="w-full pl-9 pr-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-xs text-slate-800 dark:text-white focus:outline-none focus:ring-1 focus:ring-blue-500"/>
+          </div>
+
+          {/* Month Filter */}
+          <div>
+            <select value={selectedMonth} onChange={(e) => {
+            setSelectedMonth(e.target.value);
+            if (e.target.value !== 'ALL') {
+                setStartDate('');
+                setEndDate('');
+            }
+        }} className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-xs text-slate-800 dark:text-white focus:outline-none focus:ring-1 focus:ring-blue-500 font-medium">
+              <option value="ALL">{t('tx.allMonths', 'Tất cả các tháng')}</option>
+              {availableMonths.map((m) => (<option key={m} value={m}>
+                  {formatMonthLabel(m, language)} {m === currentMonth ? `(${t('tx.quickMonth', 'Hiện tại')})` : ''}
+                </option>))}
+            </select>
+          </div>
+
+          {/* Type Filter */}
+          <div>
+            <select value={selectedType} onChange={(e) => setSelectedType(e.target.value)} className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-xs text-slate-800 dark:text-white focus:outline-none focus:ring-1 focus:ring-blue-500">
+              <option value="ALL">{t('tx.allTypes', 'Tất cả loại giao dịch')}</option>
+              <option value="EXPENSE">{t('qa.expense', 'Khoản chi')}</option>
+              <option value="INCOME">{t('qa.income', 'Khoản thu')}</option>
+              <option value="TRANSFER">{t('tx.transfer', 'Chuyển tiền nội bộ')}</option>
+            </select>
+          </div>
+
+          {/* Wallet Filter */}
+          <div>
+            <select value={selectedWallet} onChange={(e) => setSelectedWallet(e.target.value)} className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-xs text-slate-800 dark:text-white focus:outline-none focus:ring-1 focus:ring-blue-500">
+              <option value="ALL">{t('tx.allWallets', 'Tất cả ví & tài khoản')}</option>
+              {wallets.map((w) => (<option key={w.id} value={w.id}>
+                  {tWalletName ? tWalletName(w.name) : w.name} ({tWalletType(w.type)})
+                </option>))}
+            </select>
+          </div>
+
+          {/* Category Filter */}
+          <div>
+            <select value={selectedCategory} onChange={(e) => setSelectedCategory(e.target.value)} className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-xs text-slate-800 dark:text-white focus:outline-none focus:ring-1 focus:ring-blue-500">
+              <option value="ALL">{t('tx.allCategories', 'Tất cả danh mục')}</option>
+              {categories.map((c) => (<option key={c.id} value={c.id}>
+                  {tCategory(c.name)} ({c.type === 'INCOME' ? t('qa.income', 'Thu') : t('qa.expense', 'Chi')})
+                </option>))}
+            </select>
+          </div>
+
+          {/* From date */}
+          <div>
+            <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-xs text-slate-800 dark:text-white focus:outline-none focus:ring-1 focus:ring-blue-500" title={t('reports.fromDate', 'Từ ngày')}/>
+          </div>
+
+          {/* To date */}
+          <div>
+            <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="w-full px-3 py-2 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-xs text-slate-800 dark:text-white focus:outline-none focus:ring-1 focus:ring-blue-500" title={t('reports.toDate', 'Đến ngày')}/>
+          </div>
+        </div>
+
+        {/* Tag Pills */}
+        {allTags.length > 0 && (<div className="flex items-center space-x-1.5 overflow-x-auto no-scrollbar pt-1">
+            <span className="text-[11px] font-semibold text-slate-400 shrink-0">{t('qa.tags', 'Nhãn')}:</span>
+            <button onClick={() => setSelectedTag('ALL')} className={`px-2.5 py-0.5 rounded text-[11px] font-medium shrink-0 transition-colors ${selectedTag === 'ALL'
+                ? 'bg-blue-600 text-white'
+                : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}`}>
+              {t('common.all', 'Tất cả')}
+            </button>
+            {allTags.map(({ display, raw }) => {
+                const isSelected = selectedTag !== 'ALL' && (
+                    selectedTag === raw || (tTag && tTag(selectedTag) === display)
+                );
+                return (
+                    <button
+                        key={display}
+                        onClick={() => setSelectedTag(raw)}
+                        className={`px-2.5 py-0.5 rounded text-[11px] font-medium shrink-0 transition-colors ${isSelected
+                            ? 'bg-blue-600 text-white'
+                            : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200'}`}
+                    >
+                        #{display}
+                    </button>
+                );
+            })}
+          </div>)}
+      </div>
+
+      {/* 4. TIMELINE LIST */}
+      <div className="space-y-6">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 px-1">
+          <div className="flex items-center space-x-2">
+            <h3 className="text-xs font-bold text-slate-700 dark:text-slate-300 uppercase tracking-wider">
+              {t('tx.listTitle', 'Danh sách giao dịch')}
+            </h3>
+            <span className="text-xs font-semibold px-2.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400">
+              {filteredTransactions.length > visibleCount
+            ? `${visibleTransactions.length} / ${filteredTransactions.length}`
+            : `${filteredTransactions.length}`}
+            </span>
+          </div>
+          {filteredTransactions.length > visibleCount && (<span className="text-xs text-slate-400 font-medium">
+              {t('tx.showingPartial', 'Đang rút gọn danh sách để dễ theo dõi')}
+            </span>)}
+        </div>
+
+        {groupedTransactions.length === 0 ? (<div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-12 text-center">
+            <Calendar className="w-12 h-12 mx-auto text-slate-300 dark:text-slate-700 mb-3"/>
+            <h3 className="text-base font-bold text-slate-700 dark:text-slate-300 mb-1">
+              {t('tx.noTx', 'Không tìm thấy giao dịch nào')}
+            </h3>
+            <p className="text-xs text-slate-400 mb-4">
+              {t('tx.noTxSub', 'Thử thay đổi bộ lọc hoặc thêm một giao dịch thu chi mới')}
+            </p>
+            <button onClick={() => openQuickAdd('EXPENSE')} className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold rounded-xl cursor-pointer">
+              + {t('tx.newTx', 'Giao dịch mới')}
+            </button>
+          </div>) : (groupedTransactions.map((group) => (<div key={group.dateKey} className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden">
+              {/* Day Header */}
+              <div className="px-5 py-3.5 bg-slate-50/80 dark:bg-slate-800/60 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between">
+                <div className="flex items-center space-x-2">
+                  <span className="font-extrabold text-sm text-slate-800 dark:text-white">
+                    {formatDate(group.dateKey, 'dateWithDay', language)}
+                  </span>
+                  <span className="text-xs text-slate-400 font-medium">
+                    ({group.transactions.length} {t('nav.transactionsCount', 'giao dịch')})
+                  </span>
+                </div>
+                <div className="flex items-center space-x-3 text-xs">
+                  {group.dayIncome > 0 && (<span className="font-semibold text-emerald-600 dark:text-emerald-400">
+                      {formatSignedCurrency(group.dayIncome, '+')}
+                    </span>)}
+                  {group.dayExpense > 0 && (<span className="font-semibold text-rose-600 dark:text-rose-400">
+                      {formatSignedCurrency(group.dayExpense, '-')}
+                    </span>)}
+                </div>
+              </div>
+
+              {/* Transactions on this day */}
+              <div className="divide-y divide-slate-100 dark:divide-slate-800/60">
+                {group.transactions.map((tx) => (<div key={tx.id} className="p-4 hover:bg-slate-50/60 dark:hover:bg-slate-800/30 transition-colors flex items-center justify-between group">
+                    {/* Left: Icon & Info */}
+                    <div className="flex items-center space-x-3.5 truncate">
+                      <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${tx.type === 'EXPENSE'
+                    ? 'bg-rose-100 dark:bg-rose-950/60 text-rose-600 dark:text-rose-400'
+                    : tx.type === 'INCOME'
+                        ? 'bg-emerald-100 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400'
+                        : 'bg-blue-100 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400'}`}>
+                        {tx.type === 'EXPENSE' ? (<ArrowDownLeft className="w-5 h-5"/>) : tx.type === 'INCOME' ? (<ArrowUpRight className="w-5 h-5"/>) : (<ArrowRightLeft className="w-5 h-5"/>)}
+                      </div>
+
+                      <div className="truncate">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="font-bold text-sm text-slate-900 dark:text-white truncate">
+                            {tx.type === 'TRANSFER'
+                    ? `${t('tx.transferTo', 'Chuyển sang:')} ${tx.toWalletName ? (tWalletName ? tWalletName(tx.toWalletName) : tx.toWalletName) : t('nav.wallets', 'Ví')}`
+                    : tCategory(tx.categoryName || 'Khác')}
+                          </span>
+
+                          {/* Transfer Badge (Blue) */}
+                          {tx.type === 'TRANSFER' && (
+                            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-blue-100 dark:bg-blue-950/80 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800">
+                              {t('tx.transferBadge', 'Chuyển tiền nội bộ')}
+                            </span>
+                          )}
+
+                          {/* Receipt Badge */}
+                          {tx.receiptImage && (<button onClick={() => setReceiptToView(tx.receiptImage || null)} className="flex items-center space-x-1 px-1.5 py-0.5 bg-blue-50 dark:bg-blue-950 text-blue-600 dark:text-blue-400 rounded text-[10px] font-bold hover:bg-blue-100 dark:hover:bg-blue-900 transition-colors cursor-pointer" title="Receipt">
+                              <FileCheck className="w-3 h-3"/>
+                              <span>{t('qa.receiptImage', 'Hóa đơn')}</span>
+                            </button>)}
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                          <span>{formatDate(tx.date, 'time', language)}</span>
+                          <span>•</span>
+                          <span className="font-medium text-slate-700 dark:text-slate-300">
+                            {tWalletName ? tWalletName(tx.walletName) : tx.walletName}
+                          </span>
+                          {tx.note && (<>
+                              <span>•</span>
+                              <span className="text-slate-600 dark:text-slate-400 italic truncate max-w-xs">
+                                &quot;{tNote(tx.note)}&quot;
+                              </span>
+                            </>)}
+                        </div>
+
+                        {/* Tags */}
+                        {tx.tags && tx.tags.length > 0 && (<div className="flex items-center space-x-1 mt-1">
+                            {tx.tags.map((tag) => (<span key={tag} className="px-2 py-0.2 text-[10px] font-medium bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 rounded-md">
+                                #{tTag ? tTag(tag) : tag}
+                              </span>))}
+                          </div>)}
+                      </div>
+                    </div>
+
+                    {/* Right: Amount & Actions */}
+                    <div className="flex items-center space-x-4 shrink-0 ml-3">
+                      <div className="text-right">
+                        <span className={`text-base font-black ${tx.type === 'EXPENSE'
+                    ? 'text-rose-600 dark:text-rose-400'
+                    : tx.type === 'INCOME'
+                        ? 'text-emerald-600 dark:text-emerald-400'
+                        : 'text-blue-600 dark:text-blue-400'}`}>
+                          {tx.type === 'EXPENSE' ? '-' : tx.type === 'INCOME' ? '+' : ''}
+                          {formatCurrency(tx.amount)}
+                        </span>
+                        {tx.type === 'TRANSFER' && tx.fee && tx.fee > 0 && (<p className="text-[10px] text-slate-400">{t('qa.fee', 'Phí')}: {formatCurrency(tx.fee)}</p>)}
+                      </div>
+
+                      {/* Edit / Delete Buttons */}
+                      <div className="flex items-center space-x-1 opacity-80 sm:opacity-0 group-hover:opacity-100 transition-opacity">
+                        <button onClick={() => setTransactionToEdit(tx)} className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-950/40 rounded-lg transition-colors cursor-pointer" title={t('tx.edit', 'Sửa')}>
+                          <Edit2 className="w-4 h-4"/>
+                        </button>
+                        <button onClick={() => {
+                          showConfirm({
+                            title: t('tx.deleteTitle', 'Xác nhận xóa giao dịch'),
+                            message: t('tx.confirmDelete', 'Bạn có chắc chắn muốn xóa giao dịch này không? Số dư ví sẽ được hoàn tác an toàn.'),
+                            confirmText: t('common.delete', 'Xóa'),
+                            variant: 'danger',
+                            onConfirm: () => deleteTransaction(tx.id),
+                          });
+                        }} className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-lg transition-colors cursor-pointer" title={t('tx.delete', 'Xóa')}>
+                          <Trash2 className="w-4 h-4"/>
+                        </button>
+                      </div>
+                    </div>
+                  </div>))}
+              </div>
+            </div>)))}
+
+        {/* View More / Pagination Panel */}
+        {filteredTransactions.length > INITIAL_VISIBLE_COUNT && (<div className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-sm flex flex-col sm:flex-row items-center justify-between gap-3 text-center sm:text-left animate-in fade-in">
+            <div>
+              <p className="text-xs font-bold text-slate-700 dark:text-slate-300 flex items-center justify-center sm:justify-start gap-1.5">
+                <span>{t('tx.showingCount', 'Đang hiển thị')}</span>
+                <span className="text-blue-600 dark:text-blue-400 font-extrabold">{Math.min(visibleCount, filteredTransactions.length)}</span>
+                <span>{t('tx.onTotal', 'trên tổng số')}</span>
+                <span className="font-extrabold text-slate-900 dark:text-white">{filteredTransactions.length}</span>
+                <span>{t('tx.txUnit', 'giao dịch')}</span>
+              </p>
+              <p className="text-[11px] text-slate-400 mt-0.5">
+                {visibleCount < filteredTransactions.length
+                ? `${t('tx.moreRemaining', 'Còn')} ${filteredTransactions.length - visibleCount} ${t('tx.txRemaining', 'giao dịch chưa hiển thị')}`
+                : t('tx.allLoaded', 'Đã hiển thị toàn bộ giao dịch trong kỳ')}
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-center gap-2">
+              {visibleCount < filteredTransactions.length && (<button type="button" onClick={() => setVisibleCount((prev) => prev + 10)} className="flex items-center space-x-1.5 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl shadow-sm transition-all cursor-pointer active:scale-95">
+                  <span>{t('tx.viewMore', 'Xem thêm')} (+10)</span>
+                  <ChevronDown className="w-4 h-4"/>
+                </button>)}
+
+              {visibleCount < filteredTransactions.length && (<button type="button" onClick={() => setVisibleCount(filteredTransactions.length)} className="px-3.5 py-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-xs font-semibold rounded-xl transition-colors cursor-pointer">
+                  {t('tx.viewAll', 'Xem tất cả')} ({filteredTransactions.length})
+                </button>)}
+
+              {visibleCount > INITIAL_VISIBLE_COUNT && (<button type="button" onClick={() => {
+                    setVisibleCount(INITIAL_VISIBLE_COUNT);
+                }} className="flex items-center space-x-1 px-3.5 py-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 text-xs font-semibold rounded-xl transition-colors cursor-pointer">
+                  <ChevronUp className="w-4 h-4"/>
+                  <span>{t('tx.showLess', 'Thu gọn')}</span>
+                </button>)}
+            </div>
+          </div>)}
+      </div>
+      </>)}
+
+      {/* Modals */}
+      <ReceiptModal isOpen={Boolean(receiptToView)} onClose={() => setReceiptToView(null)} imageUrl={receiptToView || undefined} title={t('receipt.title', 'Chi tiết ảnh hóa đơn đính kèm')}/>
+
+      <EditTransactionModal isOpen={Boolean(transactionToEdit)} onClose={() => setTransactionToEdit(null)} transaction={transactionToEdit}/>
+    </div>);
+};
+const EditTransactionModal = ({ isOpen, onClose, transaction, }) => {
+    const { wallets, categories, editTransaction, deleteTransaction, language, t, tCategory, tWalletType, tTag, tWalletName, showConfirm } = useApp();
+    const [type, setType] = useState('EXPENSE');
+    const [amount, setAmount] = useState(0);
+    const [categoryId, setCategoryId] = useState('');
+    const [walletId, setWalletId] = useState('');
+    const [toWalletId, setToWalletId] = useState('');
+    const [fee, setFee] = useState(0);
+    const [date, setDate] = useState('');
+    const [note, setNote] = useState('');
+    const [tags, setTags] = useState([]);
+    const [receiptImage, setReceiptImage] = useState(undefined);
+    useEffect(() => {
+        if (transaction) {
+            setType(transaction.type || 'EXPENSE');
+            setAmount(transaction.amount);
+            setCategoryId(transaction.categoryId || '');
+            setWalletId(transaction.walletId || (wallets[0]?.id ?? ''));
+            setToWalletId(transaction.toWalletId || (wallets.find((w) => w.id !== transaction.walletId)?.id || wallets[0]?.id || ''));
+            setFee(transaction.fee || 0);
+            setDate(toLocalDateTimeInput(transaction.date));
+            setNote(transaction.note || '');
+            setTags(transaction.tags || []);
+            setReceiptImage(transaction.receiptImage);
+        }
+        // Only reload form when edited transaction ID changes; do not reset on background wallet sync
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [transaction?.id, isOpen]);
+    if (!isOpen || !transaction)
+        return null;
+    const handleImageUpload = async (e) => {
+        const file = e.target.files?.[0];
+        if (file) {
+            compressImageFile(file)
+                .then(setReceiptImage)
+                .catch(() => alert(t('common.imageReadError', 'Không đọc được ảnh')));
+        }
+    };
+    const handleTagToggle = (tag) => {
+        if (tags.includes(tag)) {
+            setTags(tags.filter((t) => t !== tag));
+        }
+        else {
+            setTags([...tags, tag]);
+        }
+    };
+    const handleSave = () => {
+        if (!amount || amount <= 0) {
+            alert(t('qa.invalidAmount', 'Vui lòng nhập số tiền hợp lệ'));
+            return;
+        }
+        if (type === 'TRANSFER' && walletId === toWalletId) {
+            alert(language === 'en' ? 'Receiving wallet must differ from the source wallet!' : 'Ví nhận phải khác ví chuyển!');
+            return;
+        }
+        const selectedWallet = wallets.find((w) => w.id === walletId);
+        const selectedToWallet = wallets.find((w) => w.id === toWalletId);
+        const selectedCategory = categories.find((c) => c.id === categoryId);
+        // An emptied date field must not silently move the transaction to "now"
+        if (!date) {
+            alert(language === 'en' ? 'Please choose the transaction date and time.' : 'Vui lòng chọn ngày giờ giao dịch.');
+            return;
+        }
+        const savedDate = normalizeSaveDate(date);
+        const todayKey = getLocalDateString();
+        if (toLocalDateKey(savedDate) > todayKey) {
+            alert(t('tx.noFutureDate', 'Không thể đặt ngày giao dịch trong tương lai (chưa đến ngày)! Vui lòng chọn ngày hôm nay hoặc trước đó.'));
+            return;
+        }
+        const success = editTransaction(transaction.id, {
+            type,
+            amount: Number(amount),
+            categoryId: type === 'TRANSFER' ? 'cat-transfer' : categoryId,
+            categoryName: type === 'TRANSFER' ? 'Chuyển khoản nội bộ' : (selectedCategory?.name || tCategory('Khác')),
+            walletId,
+            walletName: selectedWallet?.name,
+            toWalletId: type === 'TRANSFER' ? toWalletId : undefined,
+            toWalletName: type === 'TRANSFER' ? (selectedToWallet?.name || 'Ví nhận') : undefined,
+            fee: type === 'TRANSFER' ? Number(fee) || 0 : 0,
+            date: savedDate,
+            note,
+            tags,
+            receiptImage,
+        });
+        if (success) {
+            onClose();
+        }
+    };
+    const handleDelete = () => {
+        showConfirm({
+            title: t('tx.deleteTitle', 'Xác nhận xóa giao dịch'),
+            message: t('tx.confirmDelete', 'Bạn có chắc chắn muốn xóa giao dịch này? Số dư ví sẽ được tự động hoàn tác.'),
+            confirmText: t('common.delete', 'Xóa'),
+            variant: 'danger',
+            onConfirm: () => {
+                deleteTransaction(transaction.id);
+                onClose();
+            },
+        });
+    };
+    const filteredCategories = categories.filter((c) => c.type === (type === 'INCOME' ? 'INCOME' : 'EXPENSE'));
+    return (<div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 overflow-y-auto">
+      <div className="relative max-w-xl w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-2xl overflow-hidden my-8">
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 dark:border-slate-800">
+          <h2 className="text-xl font-bold text-slate-800 dark:text-white">
+            {t('tx.editTitle', 'Chỉnh sửa Giao dịch')}
+          </h2>
+          <button onClick={onClose} className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-white rounded-lg transition-colors cursor-pointer">
+            <X className="w-5 h-5"/>
+          </button>
+        </div>
+
+        <div className="p-6 space-y-5 max-h-[75vh] overflow-y-auto">
+          {/* Type Selector (3 tabs) */}
+          <div className="grid grid-cols-3 gap-2 bg-slate-100 dark:bg-slate-800/60 p-1.5 rounded-xl">
+            <button type="button" onClick={() => setType('EXPENSE')} className={`py-2 text-xs sm:text-sm font-semibold rounded-lg transition-all cursor-pointer ${type === 'EXPENSE'
+            ? 'bg-rose-500 text-white shadow-sm'
+            : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'}`}>
+              {t('qa.expense', 'Khoản chi')}
+            </button>
+            <button type="button" onClick={() => setType('INCOME')} className={`py-2 text-xs sm:text-sm font-semibold rounded-lg transition-all cursor-pointer ${type === 'INCOME'
+            ? 'bg-emerald-500 text-white shadow-sm'
+            : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'}`}>
+              {t('qa.income', 'Khoản thu')}
+            </button>
+            <button type="button" onClick={() => setType('TRANSFER')} className={`py-2 text-xs sm:text-sm font-semibold rounded-lg transition-all cursor-pointer ${type === 'TRANSFER'
+            ? 'bg-blue-600 text-white shadow-sm'
+            : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'}`}>
+              {t('tx.transfer', 'Chuyển tiền')}
+            </button>
+          </div>
+
+          {/* Explanation if TRANSFER */}
+          {type === 'TRANSFER' && (<div className="p-3 bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-900/50 rounded-xl text-xs text-blue-700 dark:text-blue-300">
+              <p className="font-semibold">💡 {t('tx.blueAmountTitle', 'Khoản tiền màu xanh (Chuyển tiền nội bộ):')}</p>
+              <p className="mt-0.5">
+                {t('tx.blueAmountDesc', 'Đây là giao dịch luân chuyển giữa các ví của bạn. Khoản này hiển thị màu xanh dương vì không làm thay đổi tổng tài sản ròng và không tính vào doanh thu / chi phí sinh hoạt.')}
+              </p>
+            </div>)}
+
+          {/* Amount */}
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1.5">
+              {t('qa.amount', 'Số tiền (VNĐ)')}
+            </label>
+            <div className="relative">
+              <input type="text" inputMode="numeric" value={amount ? formatNumberWithDots(amount) : ''} onChange={(e) => {
+            const cleaned = e.target.value.replace(/\D/g, '');
+            if (cleaned.length <= 12) {
+                setAmount(cleaned ? Number(cleaned) : 0);
+            }
+        }} onKeyDown={(e) => {
+            if (['e', 'E', '+', '-', '.', ','].includes(e.key)) {
+                e.preventDefault();
+            }
+        }} placeholder="0" className="w-full text-2xl font-bold pl-4 pr-10 py-3 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none dark:text-white"/>
+              <span className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 font-semibold pointer-events-none">₫</span>
+            </div>
+          </div>
+
+          {/* Wallet & Category / Source & Dest */}
+          {type === 'TRANSFER' ? (<div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1.5">
+                  {t('qa.transferSource', 'Ví chuyển (Nguồn)')}
+                </label>
+                <select value={walletId} onChange={(e) => setWalletId(e.target.value)} className="w-full px-3 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-800 dark:text-white focus:ring-2 focus:ring-blue-500 focus:outline-none text-sm">
+                  {wallets.filter((w) => w.type !== 'CREDIT').map((w) => (<option key={w.id} value={w.id}>
+                      {tWalletName ? tWalletName(w.name) : w.name} ({formatCurrency(w.balance, language)})
+                    </option>))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1.5">
+                  {t('qa.transferDest', 'Ví nhận (Đích)')}
+                </label>
+                <select value={toWalletId} onChange={(e) => setToWalletId(e.target.value)} className="w-full px-3 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-800 dark:text-white focus:ring-2 focus:ring-blue-500 focus:outline-none text-sm">
+                  {wallets.map((w) => (<option key={w.id} value={w.id}>
+                      {tWalletName ? tWalletName(w.name) : w.name} {w.type === 'CREDIT' ? `[${t('qa.payDebtNotice', 'Thanh toán trả nợ - Dư nợ:')} ${formatCurrency(w.balance, language)}]` : `(${formatCurrency(w.balance, language)})`}
+                    </option>))}
+                </select>
+              </div>
+
+              <div className="sm:col-span-2">
+                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1.5">
+                  {t('qa.transferFee', 'Phí chuyển khoản (VNĐ)')}
+                </label>
+                <input type="text" inputMode="numeric" value={fee ? formatNumberWithDots(fee) : ''} onChange={(e) => {
+                const cleaned = e.target.value.replace(/\D/g, '');
+                setFee(cleaned ? Number(cleaned) : 0);
+            }} placeholder="0" className="w-full px-3 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-800 dark:text-white focus:ring-2 focus:ring-blue-500 focus:outline-none text-sm"/>
+              </div>
+            </div>) : (<div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1.5">
+                  {type === 'INCOME' ? t('qa.receiveWallet', 'Ví nhận tiền') : t('qa.wallet', 'Ví thanh toán')}
+                </label>
+                <select value={walletId} onChange={(e) => setWalletId(e.target.value)} className="w-full px-3 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-800 dark:text-white focus:ring-2 focus:ring-blue-500 focus:outline-none text-sm font-semibold">
+                  {type === 'INCOME' ? (
+                    wallets.filter((w) => w.type !== 'CREDIT').map((w) => (
+                      <option key={w.id} value={w.id}>
+                        {tWalletName ? tWalletName(w.name) : w.name} ({formatCurrency(w.balance, language)})
+                      </option>
+                    ))
+                  ) : (
+                    wallets.map((w) => {
+                      const isCredit = w.type === 'CREDIT';
+                      const hasLimit = isCredit && w.creditLimit && w.creditLimit > 0;
+                      const avail = isCredit ? Math.max(0, (w.creditLimit || 0) - w.balance) : w.balance;
+                      return (
+                        <option key={w.id} value={w.id} disabled={isCredit && !hasLimit}>
+                          {tWalletName ? tWalletName(w.name) : w.name} {isCredit
+                            ? (hasLimit
+                                ? `[${t('wallets.creditAvailShort', 'Hạn mức còn:')} ${formatCurrency(avail, language)} • ${t('wallets.debtShort', 'Dư nợ:')} ${formatCurrency(w.balance, language)}]`
+                                : `[${t('wallets.debtShort', 'Dư nợ:')} ${formatCurrency(w.balance, language)} - ${t('qa.cannotSpendDebt', 'Khoản nợ, không thể chi tiêu')}]`)
+                            : `(${formatCurrency(w.balance, language)})`}
+                        </option>
+                      );
+                    })
+                  )}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1.5">
+                  {t('qa.category', 'Danh mục')}
+                </label>
+                <select value={categoryId} onChange={(e) => setCategoryId(e.target.value)} className="w-full px-3 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-800 dark:text-white focus:ring-2 focus:ring-blue-500 focus:outline-none text-sm">
+                  <option value="">-- {t('qa.selectCategory', 'Chọn danh mục')} --</option>
+                  {filteredCategories.map((c) => (<option key={c.id} value={c.id}>
+                      {tCategory(c.name)}
+                    </option>))}
+                </select>
+              </div>
+            </div>)}
+
+          {/* Date & Time */}
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1.5">
+              {t('qa.date', 'Thời gian giao dịch')}
+            </label>
+            <input type="datetime-local" required max={toLocalDateTimeInput()} value={date} onChange={(e) => setDate(e.target.value)} className="w-full px-3 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-800 dark:text-white focus:ring-2 focus:ring-blue-500 focus:outline-none text-sm"/>
+            <DatePreview value={date} language={language}/>
+          </div>
+
+          {/* Note */}
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1.5">
+              {t('qa.note', 'Ghi chú')}
+            </label>
+            <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={2} placeholder={t('qa.notePlaceholder', 'Nhập ghi chú chi tiết...')} className="w-full px-3 py-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-slate-800 dark:text-white focus:ring-2 focus:ring-blue-500 focus:outline-none text-sm"/>
+          </div>
+
+          {/* Tags */}
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1.5">
+              {t('qa.tags', 'Nhãn')}
+            </label>
+            <div className="flex flex-wrap gap-1.5">
+              {POPULAR_TAGS.map((tag) => (<button key={tag} type="button" onClick={() => handleTagToggle(tag)} className={`px-3 py-1 rounded-full text-xs font-medium transition-all cursor-pointer ${tags.includes(tag)
+                ? 'bg-blue-600 text-white'
+                : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200'}`}>
+                  #{tTag ? tTag(tag) : tag}
+                </button>))}
+            </div>
+          </div>
+
+          {/* Receipt Image */}
+          <div>
+            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 mb-1.5">
+              {t('qa.receiptImage', 'Ảnh hóa đơn / chứng từ')}
+            </label>
+            {receiptImage ? (<div className="relative inline-block border border-slate-200 dark:border-slate-700 rounded-xl overflow-hidden">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={receiptImage} alt={t('bills.receiptAlt', 'Hóa đơn')} className="h-32 object-contain bg-slate-100 dark:bg-slate-800"/>
+                <button type="button" onClick={() => setReceiptImage(undefined)} className="absolute top-2 right-2 p-1.5 bg-rose-600 text-white rounded-lg hover:bg-rose-700 transition-colors shadow cursor-pointer">
+                  <Trash2 className="w-4 h-4"/>
+                </button>
+              </div>) : (<label className="flex flex-col items-center justify-center p-4 border-2 border-dashed border-slate-300 dark:border-slate-700 rounded-xl cursor-pointer hover:border-blue-500 transition-colors">
+                <Upload className="w-6 h-6 text-slate-400 mb-1"/>
+                <span className="text-xs text-slate-500 dark:text-slate-400">
+                  {t('qa.uploadReceipt', 'Tải ảnh hóa đơn lên')}
+                </span>
+                <input type="file" accept="image/*" onChange={handleImageUpload} className="hidden"/>
+              </label>)}
+          </div>
+        </div>
+
+        {/* Footer Actions */}
+        <div className="flex items-center justify-between px-6 py-4 border-t border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/50">
+          <button type="button" onClick={handleDelete} className="flex items-center space-x-1.5 px-4 py-2.5 text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-xl font-medium text-sm transition-colors cursor-pointer">
+            <Trash2 className="w-4 h-4"/>
+            <span>{t('tx.delete', 'Xóa giao dịch')}</span>
+          </button>
+
+          <div className="flex items-center space-x-3">
+            <button type="button" onClick={onClose} className="px-4 py-2.5 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-800 rounded-xl font-medium text-sm transition-colors cursor-pointer">
+              {t('common.cancel', 'Hủy')}
+            </button>
+            <button type="button" onClick={handleSave} className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-xl text-sm transition-colors shadow-sm cursor-pointer">
+              {t('common.save', 'Lưu thay đổi')}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>);
+};

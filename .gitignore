@@ -1,0 +1,61 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build outputs
+.next/
+out/
+dist/
+build/
+*.tsbuildinfo
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.log
+
+# Environment (.env.example is the documented template)
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Misc
+*.pem
+.vercel
+
+# Du lieu tai chinh ca nhan & tai khoan nguoi dung (khong commit len git)
+data/*.json
+data/users/
+data/users.json
+data/.session_secret
+data/.backup_key
+data/.host_setup_code
+data/secure-backups/
+data/database.json.*
+!data/database.template.json
+
+# Database dumps from npm run db:backup (contain everybody's financial data)
+backups/
+data/legacy-json-*/
+
+# PID cua start.sh
+.server.pid
+.ngrok.pid
+.cloudflared.pid
+current_url.txt
+logs_prod.log
+ngrok.log
+tunnel.log
